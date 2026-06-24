@@ -33,8 +33,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # Init scripts run in alphabetical order on first start
+      # 00-redmine-db.sql creates the redmine database before 01-schema.sql runs
       - ./context-store/schema/postgres:/docker-entrypoint-initdb.d:ro
-      - ./scripts/create-redmine-db.sql:/docker-entrypoint-initdb.d/00-redmine-db.sql:ro
     ports:
       - "5432:5432"
     healthcheck:

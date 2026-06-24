@@ -1,0 +1,16 @@
+# Environment
+.env
+
+# Helm secrets — encrypt with: vi -x helm/secrets.yaml
+helm/secrets.yaml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store

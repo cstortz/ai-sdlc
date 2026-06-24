@@ -1,0 +1,168 @@
+# =============================================================================
+# AI SDLC — Model Router Configuration
+# =============================================================================
+# Each agent maps to a "profile" defined here.
+# Required fields per profile: primary, fallback
+# Optional fields are shown commented out — uncomment and set to override defaults.
+#
+# Model identifiers:
+#   Anthropic:   claude-opus-4-8 | claude-sonnet-4-6 | claude-haiku-4-5-20251001
+#   Open source: llama-3.3-70b-versatile (Groq) | meta-llama/Llama-3.3-70B-Instruct (Together)
+#                mistral-large-latest | mixtral-8x7b-32768 (Groq)
+#
+# Providers:
+#   anthropic | groq | together | openai | ollama
+#
+# Routing logic (router/router.py reads this file at startup):
+#   1. Use profile.primary
+#   2. On API error or if primary unavailable → fall back to profile.fallback
+#   3. If cost_threshold is set and estimated_cost > threshold → downgrade to fallback
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Defaults — applied to any profile that omits the key
+# ---------------------------------------------------------------------------
+defaults:
+  # temperature: 0.2
+  # max_tokens: 4096
+  # request_timeout_seconds: 120
+  # retry_attempts: 3
+  # cost_threshold_usd: null   # null = no auto-downgrade
+
+# ---------------------------------------------------------------------------
+# Profiles — one per agent / task type
+# ---------------------------------------------------------------------------
+profiles:
+
+  # --- L1: Intake Agent -------------------------------------------------------
+  # Needs strong language understanding to extract intent from freeform prompts
+  # and Redmine ticket descriptions. Sonnet is sufficient; Haiku as fallback.
+  intake:
+    primary:
+      model: claude-sonnet-4-6
+      provider: anthropic
+    fallback:
+      model: llama-3.3-70b-versatile
+      provider: groq
+    # temperature: 0.3       # Slightly creative for interviewing / follow-up questions
+    # max_tokens: 2048
+    # cost_threshold_usd: 0.05
+
+  # --- L2: Architecture Agent -------------------------------------------------
+  # Highest-stakes decisions; needs deep reasoning over complex requirements.
+  # Opus primary — this is where you want the best model.
+  architecture:
+    primary:
+      model: claude-opus-4-8
+      provider: anthropic
+    fallback:
+      model: claude-sonnet-4-6
+      provider: anthropic
+    # temperature: 0.1       # Low temp for deterministic architectural reasoning
+    # max_tokens: 8192       # ADRs and system designs can be long
+    # cost_threshold_usd: 0.50
+
+  # --- L3: Implementation Agent -----------------------------------------------
+  # Code generation. Sonnet hits the sweet spot of quality vs cost for most tasks.
+  # Open-source fallback for boilerplate / repetitive code generation tasks.
+  implementation:
+    primary:
+      model: claude-sonnet-4-6
+      provider: anthropic
+    fallback:
+      model: meta-llama/Llama-3.3-70B-Instruct
+      provider: together
+    # temperature: 0.1       # Low temp for code — determinism over creativity
+    # max_tokens: 8192
+    # cost_threshold_usd: 0.20
+
+  # --- L4: Test & Security Agent ----------------------------------------------
+  # Test generation + SAST analysis. Sonnet for primary; Haiku for fast/cheap
+  # routine test scaffolding. Security analysis always uses at minimum Sonnet.
+  testing:
+    primary:
+      model: claude-sonnet-4-6
+      provider: anthropic
+    fallback:
+      model: claude-haiku-4-5-20251001
+      provider: anthropic
+    # temperature: 0.0       # Fully deterministic for security analysis
+    # max_tokens: 4096
+
+  security_scan:
+    primary:
+      model: claude-sonnet-4-6
+      provider: anthropic
+    fallback:
+      model: claude-sonnet-4-6    # No downgrade for security — fallback = same model, different key
+      provider: anthropic
+    # temperature: 0.0
+    # max_tokens: 4096
+
+  # --- L5: Review Agent -------------------------------------------------------
+  # Code review and PR summary. Sonnet for nuanced review; Haiku for PR description
+  # generation (cheap, fast, formulaic).
+  code_review:
+    primary:
+      model: claude-sonnet-4-6
+      provider: anthropic
+    fallback:
+      model: mixtral-8x7b-32768
+      provider: groq
+    # temperature: 0.2
+    # max_tokens: 4096
+
+  pr_description:
+    primary:
+      model: claude-haiku-4-5-20251001
+      provider: anthropic
+    fallback:
+      model: llama-3.3-70b-versatile
+      provider: groq
+    # temperature: 0.3
+    # max_tokens: 1024
+
+  # --- L6: Deploy Agent -------------------------------------------------------
+  # Primarily orchestration logic rather than language tasks; Haiku is sufficient.
+  # Cost and gate evaluation uses Sonnet for reliability.
+  deploy_orchestration:
+    primary:
+      model: claude-haiku-4-5-20251001
+      provider: anthropic
+    fallback:
+      model: llama-3.3-70b-versatile
+      provider: groq
+    # temperature: 0.0
+    # max_tokens: 1024
+
+  gate_evaluation:
+    primary:
+      model: claude-sonnet-4-6
+      provider: anthropic
+    fallback:
+      model: claude-haiku-4-5-20251001
+      provider: anthropic
+    # temperature: 0.0
+
+  # --- L7: Monitor Agent ------------------------------------------------------
+  # High-volume, low-cost: Haiku for routine log triage.
+  # Sonnet escalates only when an incident needs deep root-cause analysis.
+  monitor_triage:
+    primary:
+      model: claude-haiku-4-5-20251001
+      provider: anthropic
+    fallback:
+      model: llama-3.3-70b-versatile
+      provider: groq
+    # temperature: 0.0
+    # max_tokens: 1024
+
+  incident_analysis:
+    primary:
+      model: claude-sonnet-4-6
+      provider: anthropic
+    fallback:
+      model: claude-opus-4-8
+      provider: anthropic    # Escalate UP for severe incidents
+    # temperature: 0.1
+    # max_tokens: 4096

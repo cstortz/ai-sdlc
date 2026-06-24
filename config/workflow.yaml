@@ -1,0 +1,105 @@
+# =============================================================================
+# AI SDLC — Workflow Operational Controls
+# =============================================================================
+# This file controls runtime behavior of the pipeline — thresholds, timeouts,
+# cost guards, canary settings, and notifications.
+#
+# IMPORTANT: This file must be human-authored. Agents read it; they never write it.
+#
+# Autonomy phases (set per-agent in agents.yaml):
+#   human_loop   — every output requires human approval
+#   gate_points  — autonomous; pauses only at defined gate conditions
+#   ai_primary   — fully autonomous; escalates on low confidence or gate hit
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Confidence thresholds
+# Agents emit a confidence score (0.0–1.0) with each output.
+# These thresholds control when auto-approval or regeneration kicks in.
+# ---------------------------------------------------------------------------
+thresholds:
+  # Minimum confidence to auto-approve a PRD/spec (gate_points phase and above)
+  spec_confidence_auto_approve: 0.90
+
+  # Minimum weighted review score to auto-merge a PR (gate_points phase and above)
+  code_review_score_auto_merge: 0.85
+
+  # Review score below which implementation is regenerated (all phases)
+  code_review_score_regen: 0.70
+
+  # Minimum test coverage % required to proceed past L4
+  min_test_coverage_pct: 80
+
+  # SAST finding severity that blocks the pipeline
+  # Options: low | medium | high | critical
+  sast_block_severity: medium
+
+# ---------------------------------------------------------------------------
+# Canary deployment (L6 Deploy Agent)
+# Applied to production deployments in gate_points and ai_primary phases.
+# ---------------------------------------------------------------------------
+canary:
+  # Minutes to monitor canary before promoting to full rollout
+  window_minutes: 15
+
+  # Max allowed increase in error rate during canary window (absolute, e.g. 0.01 = +1%)
+  error_rate_delta_max: 0.01
+
+  # Percentage of traffic to route to canary before promotion
+  traffic_pct: 10
+
+# ---------------------------------------------------------------------------
+# Per-stage operational controls
+# ---------------------------------------------------------------------------
+stages:
+
+  intake:
+    # Max number of clarifying questions the agent may ask before forcing a draft PRD
+    max_clarifying_questions: 3
+
+    # Hours before an unanswered human-gate request is escalated / re-notified
+    approval_timeout_hours: 48
+
+    # Auto-apply 'needs-prd' label to Redmine tickets that arrive without a description
+    auto_label_unlabelled: true
+
+  architecture:
+    # Breaking API, schema, or security changes always require human review,
+    # regardless of autonomy_phase setting in agents.yaml
+    breaking_change_always_escalate: true
+
+  implementation:
+    # Max times the agent may regenerate code before escalating to human
+    max_regen_iterations: 3
+
+  testing:
+    # Environments the deploy agent targets (in order)
+    deploy_environments:
+      - staging
+      - production
+
+  review:
+    # PR description template (relative to repo root)
+    pr_template: .github/PULL_REQUEST_TEMPLATE.md
+
+# ---------------------------------------------------------------------------
+# Cost controls
+# ---------------------------------------------------------------------------
+cost_controls:
+  # Maximum Anthropic API calls per feature/issue before the pipeline pauses
+  # and requires human acknowledgement to continue
+  max_api_calls_per_feature: 50
+
+  # Monthly spend alert threshold in USD (alert only — does not block)
+  budget_alert_monthly_usd: 500
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+notifications:
+  # @mention relevant code owners in GitHub PR escalation comments
+  github_mention_code_owners: true
+
+  # Slack webhook secret name (set in secrets.yaml → mounted as env var)
+  # Leave null to disable Slack alerts
+  slack_webhook_secret: null   # e.g. SLACK_WEBHOOK_URL

@@ -1,0 +1,8 @@
+# Helm ignores these when packaging the chart
+.git/
+.gitignore
+*.swp
+*.swo
+# IMPORTANT: never package the secrets file — it belongs only on the operator's machine
+secrets.yaml
+secrets.yaml.swp

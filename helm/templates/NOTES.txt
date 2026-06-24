@@ -1,0 +1,60 @@
+============================================================
+AI SDLC — Helm Chart Deployed
+============================================================
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+
+------------------------------------------------------------
+SERVICES (ClusterIP — internal only by default)
+------------------------------------------------------------
+  Postgres:   {{ include "ai-sdlc.postgresHost" . }}:5432
+  Redis:      {{ include "ai-sdlc.redisHost" . }}:6379
+  Neo4j bolt: {{ include "ai-sdlc.neo4jBoltUri" . }}
+  Neo4j UI:   http://{{ .Release.Name }}-neo4j-neo4j:7474
+  Redmine:    http://{{ .Release.Name }}-redmine:3000
+
+------------------------------------------------------------
+QUICK ACCESS (port-forward for local inspection)
+------------------------------------------------------------
+  kubectl port-forward svc/{{ .Release.Name }}-postgres-postgresql 5432:5432 -n {{ .Values.namespaceOverride | default .Release.Namespace }}
+  kubectl port-forward svc/{{ .Release.Name }}-redis-master 6379:6379 -n {{ .Values.namespaceOverride | default .Release.Namespace }}
+  kubectl port-forward svc/{{ .Release.Name }}-neo4j-neo4j 7474:7474 7687:7687 -n {{ .Values.namespaceOverride | default .Release.Namespace }}
+  kubectl port-forward svc/{{ .Release.Name }}-redmine 3000:3000 -n {{ .Values.namespaceOverride | default .Release.Namespace }}
+
+------------------------------------------------------------
+NEXT STEPS
+------------------------------------------------------------
+1. Get Redmine admin credentials:
+     kubectl get secret --namespace {{ .Values.namespaceOverride | default .Release.Namespace }} \
+       {{ .Release.Name }}-redmine -o jsonpath="{.data.redmine-password}" | base64 -d
+
+2. Log in to Redmine → My Account → copy API key → update secrets.yaml:
+     redmineApi:
+       key: "<your-key>"
+   Then: helm upgrade ai-sdlc ./helm -f helm/values.yaml -f helm/secrets.yaml
+
+3. Run the Neo4j schema (Cypher constraints + indexes):
+     kubectl exec -it <neo4j-pod> -n {{ .Values.namespaceOverride | default .Release.Namespace }} -- \
+       cypher-shell -u neo4j -p <password> \
+       -f /var/lib/neo4j/import/01-schema.cypher
+
+4. Verify pgvector is available:
+     kubectl exec -it <postgres-pod> -n {{ .Values.namespaceOverride | default .Release.Namespace }} -- \
+       psql -U sdlc -d sdlc -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
+
+------------------------------------------------------------
+UPGRADING
+------------------------------------------------------------
+  helm upgrade ai-sdlc ./helm \
+    -f helm/values.yaml \
+    -f helm/secrets.yaml \
+    --set-file agentConfig.modelsConfig=config/models.yaml \
+    --set-file agentConfig.agentsConfig=config/agents.yaml
+
+------------------------------------------------------------
+SECRETS REMINDER
+------------------------------------------------------------
+  secrets.yaml is NOT in git. Keep it encrypted:
+    vi -x secrets.yaml
+============================================================

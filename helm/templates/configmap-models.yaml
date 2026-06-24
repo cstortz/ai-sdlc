@@ -1,0 +1,20 @@
+{{- if .Values.agentConfig.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ai-sdlc.fullname" . }}-models
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "ai-sdlc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-config
+data:
+  models.yaml: |
+    {{- if .Values.agentConfig.modelsConfig }}
+    {{- .Values.agentConfig.modelsConfig | nindent 4 }}
+    {{- else }}
+    # models.yaml not injected — deploy with:
+    # helm install ai-sdlc ./helm -f helm/values.yaml \
+    #   --set-file agentConfig.modelsConfig=config/models.yaml
+    {{- end }}
+{{- end }}

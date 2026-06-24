@@ -1,0 +1,147 @@
+# =============================================================================
+# AI SDLC — Infrastructure Stack
+# =============================================================================
+# Services:
+#   postgres   — shared Postgres 16 + pgvector (agent state, audit, embeddings)
+#   neo4j      — graph DB for artifact traceability flows
+#   redis      — agent state cache, pub/sub for escalation bus
+#   redmine    — project management / work item source of truth
+#   adminer    — lightweight DB UI (optional, comment out in prod)
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f <service>
+#   docker compose down -v   # ⚠ destroys volumes
+# =============================================================================
+
+name: ai-sdlc
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Postgres 16 + pgvector
+  # Databases: sdlc (agent state/audit/embeddings), redmine (Redmine app)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: sdlc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sdlc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: sdlc
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Init scripts run in alphabetical order on first start
+      - ./context-store/schema/postgres:/docker-entrypoint-initdb.d:ro
+      - ./scripts/create-redmine-db.sql:/docker-entrypoint-initdb.d/00-redmine-db.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sdlc} -d sdlc"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Neo4j 5 — traceability graph
+  # Nodes: Feature, PRD, ADR, Implementation, TestSuite, Deployment, Incident
+  # Relationships: IMPLEMENTS, TESTS, DEPENDS_ON, TRIGGERED_BY, RESOLVES
+  # ---------------------------------------------------------------------------
+  neo4j:
+    image: neo4j:5
+    container_name: sdlc-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-changeme}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+      NEO4J_dbms_memory_heap_initial__size: 512m
+      NEO4J_dbms_memory_heap_max__size: 1G
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - ./context-store/schema/neo4j:/var/lib/neo4j/import:ro
+    ports:
+      - "7474:7474"   # Browser UI
+      - "7687:7687"   # Bolt protocol
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+
+  # ---------------------------------------------------------------------------
+  # Redis 7 — agent state cache + escalation bus (pub/sub)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: sdlc-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-changeme}
+      --appendonly yes
+      --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Redmine — work item / project management source of truth
+  # Uses the shared Postgres instance (redmine database)
+  # ---------------------------------------------------------------------------
+  redmine:
+    image: redmine:5
+    container_name: sdlc-redmine
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      REDMINE_DB_POSTGRES: postgres
+      REDMINE_DB_PORT: 5432
+      REDMINE_DB_DATABASE: redmine
+      REDMINE_DB_USERNAME: ${POSTGRES_USER:-sdlc}
+      REDMINE_DB_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      REDMINE_SECRET_KEY_BASE: ${REDMINE_SECRET:-please_change_this_secret}
+    volumes:
+      - redmine_files:/usr/src/redmine/files
+      - redmine_plugins:/usr/src/redmine/plugins
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000 || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Adminer — lightweight DB UI (disable in production)
+  # Access: http://localhost:8080
+  #   System: PostgreSQL, Server: postgres, User/Pass from .env
+  # ---------------------------------------------------------------------------
+  adminer:
+    image: adminer:latest
+    container_name: sdlc-adminer
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - "8080:8080"
+    profiles:
+      - dev   # Only starts with: docker compose --profile dev up
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:
+  redis_data:
+  redmine_files:
+  redmine_plugins:

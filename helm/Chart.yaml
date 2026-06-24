@@ -1,0 +1,43 @@
+apiVersion: v2
+name: ai-sdlc
+description: >
+  Agentic AI SDLC infrastructure stack — Postgres+pgvector, Neo4j,
+  Redis, and Redmine deployed as a single Helm umbrella chart.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+maintainers:
+  - name: Carey Stortz
+
+dependencies:
+  # -------------------------------------------------------------------------
+  # PostgreSQL 16 — agent state, audit trail, pgvector embeddings
+  # Image is overridden in values.yaml to pgvector/pgvector:pg16
+  # -------------------------------------------------------------------------
+  - name: postgresql
+    version: "15.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    alias: postgres
+
+  # -------------------------------------------------------------------------
+  # Redis 7 — agent state cache + escalation bus pub/sub
+  # -------------------------------------------------------------------------
+  - name: redis
+    version: "19.x.x"
+    repository: https://charts.bitnami.com/bitnami
+
+  # -------------------------------------------------------------------------
+  # Redmine 5 — work item / project management source of truth
+  # Uses the internal postgres service (externalDatabase config in values.yaml)
+  # -------------------------------------------------------------------------
+  - name: redmine
+    version: "29.x.x"
+    repository: https://charts.bitnami.com/bitnami
+
+  # -------------------------------------------------------------------------
+  # Neo4j 5 — traceability graph DB
+  # -------------------------------------------------------------------------
+  - name: neo4j
+    version: "5.x.x"
+    repository: https://helm.neo4j.com/neo4j

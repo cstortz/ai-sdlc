@@ -1,0 +1,342 @@
+# =============================================================================
+# AI SDLC — Agent Definitions
+# =============================================================================
+# Each entry defines one pipeline agent: which layer it belongs to, which
+# model profile it uses (from config/models.yaml), what tools it has access
+# to, and how human gates and escalation behave.
+#
+# autonomy_phase controls how the agent operates today:
+#   human_loop    — every output requires human approval before flowing downstream
+#   gate_points   — runs autonomously; pauses only at defined gate conditions
+#   ai_primary    — fully autonomous; escalates only on low confidence or gate hit
+#
+# Change autonomy_phase here (without touching agent code) to progress
+# through the autonomy roadmap.
+# =============================================================================
+
+agents:
+
+  # ---------------------------------------------------------------------------
+  # L1 · Intake Agent
+  # ---------------------------------------------------------------------------
+  intake:
+    layer: 1
+    description: "Accepts a natural-language prompt or Redmine ticket and produces a structured PRD with user stories and acceptance criteria."
+    model_profile: intake
+    autonomy_phase: human_loop   # Output requires your approval before flowing to L2
+
+    inputs:
+      - type: nl_prompt
+        description: "Free-form feature description typed directly"
+      - type: redmine_ticket
+        description: "Redmine issue (fetched via API on webhook or poll)"
+
+    outputs:
+      - type: prd_markdown
+        destination: docs/prds/{feature_id}.md
+      - type: redmine_update
+        description: "Updates the source ticket with structured fields"
+      - type: graph_node
+        label: PRD
+        description: "Creates PRD node in Neo4j, links to Feature node"
+
+    tools:
+      - redmine_api          # Read/write Redmine tickets
+      - file_write           # Write PRD markdown to repo
+      - neo4j_write          # Create/update graph nodes
+      - postgres_write       # Log agent run to audit table
+
+    gates:
+      - type: human_approval
+        trigger: always
+        message: "Review PRD before architecture begins"
+
+    escalation:
+      - condition: low_confidence     # confidence < 0.7
+        action: ask_human
+        message: "Requirements unclear — need clarification before proceeding"
+      - condition: missing_fields
+        action: ask_human
+        fields: [acceptance_criteria, out_of_scope]
+
+  # ---------------------------------------------------------------------------
+  # L2 · Architecture Agent
+  # ---------------------------------------------------------------------------
+  architecture:
+    layer: 2
+    description: "Reads the approved PRD and proposes system architecture, generates ADRs, and produces a technical spec."
+    model_profile: architecture
+    autonomy_phase: human_loop   # Architecture decisions always require approval
+
+    inputs:
+      - type: approved_prd
+        source: docs/prds/{feature_id}.md
+
+    outputs:
+      - type: adr_markdown
+        destination: docs/adrs/{feature_id}-{adr_id}.md
+      - type: tech_spec_markdown
+        destination: docs/specs/{feature_id}.md
+      - type: graph_nodes
+        labels: [ADR]
+        relationships:
+          - PRD -[INFORMED_BY]-> ADR
+
+    tools:
+      - file_read            # Read PRD and existing ADRs / codebase context
+      - file_write           # Write ADRs and spec
+      - neo4j_write
+      - postgres_write
+
+    gates:
+      - type: human_approval
+        trigger: always
+        message: "Review architecture and ADRs — this is a permanent gate"
+
+    escalation:
+      - condition: conflicting_adrs
+        action: ask_human
+        message: "Conflicting architectural decisions detected — need resolution"
+      - condition: new_external_dependency
+        action: ask_human
+        message: "Proposed architecture introduces a new external dependency"
+
+  # ---------------------------------------------------------------------------
+  # L3 · Implementation Agent
+  # ---------------------------------------------------------------------------
+  implementation:
+    layer: 3
+    description: "Implements the approved technical spec using Claude Code / Agent SDK. Opens a PR on completion."
+    model_profile: implementation
+    autonomy_phase: gate_points   # Runs autonomously; only pauses at defined gates
+
+    inputs:
+      - type: approved_tech_spec
+        source: docs/specs/{feature_id}.md
+      - type: adrs
+        source: docs/adrs/{feature_id}-*.md
+
+    outputs:
+      - type: code_changes
+        destination: git_branch
+        branch_pattern: "feat/{feature_id}"
+      - type: pull_request
+        description: "Opens draft PR on GitHub"
+      - type: graph_node
+        label: Implementation
+        relationships:
+          - ADR -[IMPLEMENTED_BY]-> Implementation
+          - PRD -[REALIZED_IN]-> Implementation
+
+    tools:
+      - claude_code          # Claude Code / Agent SDK for code generation
+      - github_api           # Branch creation, PR creation
+      - file_read
+      - file_write
+      - neo4j_write
+      - postgres_write
+
+    gates:
+      - type: human_approval
+        trigger: security_change_detected
+        message: "Implementation touches auth/permissions/PII — review required"
+
+    escalation:
+      - condition: spec_ambiguity
+        action: ask_human
+        message: "Spec is ambiguous for this implementation decision"
+      - condition: low_confidence
+        action: pause_and_notify
+        message: "Implementation confidence low — flagging for review"
+
+  # ---------------------------------------------------------------------------
+  # L4 · Test & Security Agent
+  # ---------------------------------------------------------------------------
+  testing:
+    layer: 4
+    description: "Generates unit and integration tests, runs them, performs SAST and dependency scanning."
+    model_profiles:
+      test_generation: testing
+      security_analysis: security_scan
+    autonomy_phase: gate_points
+
+    inputs:
+      - type: implementation_branch
+        source: git_branch
+
+    outputs:
+      - type: test_files
+        destination: tests/
+      - type: test_results
+        destination: postgres_audit
+      - type: security_report
+        destination: docs/security/{feature_id}-scan.md
+      - type: graph_node
+        label: TestSuite
+        relationships:
+          - Implementation -[TESTED_BY]-> TestSuite
+
+    tools:
+      - github_api           # Checkout branch, push test files
+      - github_actions       # Trigger CI run
+      - file_write
+      - neo4j_write
+      - postgres_write
+
+    gates:
+      - type: human_approval
+        trigger: security_finding_severity_high
+        message: "High-severity security finding — must be reviewed before merge"
+      - type: block_pipeline
+        trigger: test_failure
+        message: "Tests failing — implementation must be fixed before review"
+
+    escalation:
+      - condition: security_finding
+        severity: [medium, high, critical]
+        action: notify_and_gate
+        message: "Security finding: {finding_summary}"
+
+  # ---------------------------------------------------------------------------
+  # L5 · Review Agent
+  # ---------------------------------------------------------------------------
+  review:
+    layer: 5
+    description: "Performs AI code review, generates PR summary, and decides merge or escalate."
+    model_profiles:
+      code_review: code_review
+      pr_description: pr_description
+    autonomy_phase: gate_points   # Non-critical PRs auto-merge; critical ones escalate
+
+    inputs:
+      - type: pull_request
+        source: github_api
+      - type: test_results
+        source: postgres_audit
+      - type: security_report
+        source: docs/security/
+
+    outputs:
+      - type: pr_review_comment
+        destination: github_pr
+      - type: pr_description_update
+        destination: github_pr
+      - type: merge_decision
+        values: [auto_merge, request_human_review, block]
+
+    tools:
+      - github_api
+      - file_read
+      - neo4j_read           # Check traceability — does this PR match the spec?
+      - postgres_write
+
+    gates:
+      - type: human_approval
+        trigger: critical_path_change
+        message: "PR touches critical path — human review required"
+      - type: human_approval
+        trigger: confidence_below_threshold   # review confidence < 0.8
+        message: "Review confidence low — flagging for human check"
+
+    escalation:
+      - condition: spec_drift
+        action: ask_human
+        message: "Implementation diverges from approved spec — clarify intent"
+
+  # ---------------------------------------------------------------------------
+  # L6 · Deploy Agent
+  # ---------------------------------------------------------------------------
+  deploy:
+    layer: 6
+    description: "Orchestrates CI/CD pipeline, manages staged rollout, enforces prod gate."
+    model_profiles:
+      orchestration: deploy_orchestration
+      gate_evaluation: gate_evaluation
+    autonomy_phase: gate_points
+
+    inputs:
+      - type: merged_pr
+        source: github_api
+
+    outputs:
+      - type: deployment_event
+        environments: [staging, production]
+      - type: graph_node
+        label: Deployment
+        relationships:
+          - Implementation -[DEPLOYED_AS]-> Deployment
+
+    tools:
+      - github_actions       # Trigger deployment workflows
+      - github_api
+      - neo4j_write
+      - postgres_write
+
+    gates:
+      - type: human_approval
+        trigger: production_deployment
+        message: "Production deployment — approval required"
+        # Set to false to enable full automation:
+        enabled: true
+      - type: human_approval
+        trigger: cost_impact_detected
+        message: "Deployment introduces new billable resources — cost review required"
+      - type: human_approval
+        trigger: infrastructure_change
+        message: "Deployment modifies infrastructure — architectural review required"
+
+    escalation:
+      - condition: deployment_failure
+        action: rollback_and_notify
+        message: "Deployment failed — automatic rollback initiated"
+
+  # ---------------------------------------------------------------------------
+  # L7 · Monitor Agent
+  # ---------------------------------------------------------------------------
+  monitor:
+    layer: 7
+    description: "Watches logs and alerts, triages incidents, proposes fixes, feeds learnings back to L1."
+    model_profiles:
+      triage: monitor_triage
+      incident_analysis: incident_analysis
+    autonomy_phase: ai_primary   # Most autonomous layer — human only on severe incidents
+
+    inputs:
+      - type: github_actions_logs
+        poll_interval_seconds: 60
+      - type: application_logs
+        source: configured_log_sink
+      - type: alerts
+        source: alerting_integration
+
+    outputs:
+      - type: incident_record
+        destination: postgres_audit
+      - type: graph_node
+        label: Incident
+        relationships:
+          - Deployment -[PRODUCED]-> Incident
+          - Incident -[RESOLVED_BY]-> Implementation   # Links to fix PR
+      - type: feedback_to_intake
+        description: "High-signal learnings pushed back as context for future features"
+
+    tools:
+      - github_api
+      - neo4j_write
+      - neo4j_read
+      - postgres_write
+      - postgres_read
+
+    gates:
+      - type: human_approval
+        trigger: incident_severity_critical
+        message: "Critical incident detected — immediate human review"
+      - type: human_approval
+        trigger: cost_spike
+        message: "Abnormal cost spike detected — review cloud spend"
+
+    escalation:
+      - condition: repeated_incident
+        description: "Same incident type 3+ times in 24h"
+        action: escalate_to_architecture
+        message: "Recurring incident suggests architectural issue — flagging for L2 review"

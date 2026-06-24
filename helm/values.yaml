@@ -1,0 +1,203 @@
+# =============================================================================
+# AI SDLC — Helm Values (non-secret)
+# =============================================================================
+# Secrets (passwords, API keys) live in secrets.yaml — encrypt that file
+# with:  vi -x secrets.yaml
+# Deploy with both files:
+#   helm install ai-sdlc ./helm -f helm/values.yaml -f helm/secrets.yaml
+#
+# Storage class defaults assume k3s (local-path).
+# Override global.storageClass for other distributions.
+# =============================================================================
+
+global:
+  # storageClass is intentionally empty — PVCs use the cluster default SC automatically.
+  # Cluster default: nfs-client (nfs-subdir-external-provisioner)
+  # ReclaimPolicy: Delete — PV and NFS share are removed when a PVC is deleted.
+  # ALLOWVOLUMEEXPANSION: true — PVC sizes can be increased without re-provisioning.
+  storageClass: ""
+
+# =============================================================================
+# PostgreSQL (Bitnami) — image overridden to pgvector/pgvector:pg16
+# =============================================================================
+postgres:
+  image:
+    registry: docker.io
+    repository: pgvector/pgvector
+    tag: pg16
+    pullPolicy: IfNotPresent
+
+  auth:
+    database: sdlc
+    username: sdlc
+    # password and postgresPassword come from secrets.yaml
+
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""   # empty = inherits global.storageClass (nfs-client default)
+
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+
+    initdb:
+      # Create the redmine database alongside sdlc on first start
+      scripts:
+        create-redmine-db.sql: |
+          CREATE DATABASE redmine;
+          GRANT ALL PRIVILEGES ON DATABASE redmine TO sdlc;
+
+      # Run the SDLC schema after the redmine DB is created
+      scriptsConfigMap: ai-sdlc-postgres-schema
+
+  service:
+    type: ClusterIP
+    port: 5432
+
+# =============================================================================
+# Redis (Bitnami)
+# =============================================================================
+redis:
+  architecture: standalone   # standalone sufficient for single-node k3s prod
+
+  auth:
+    enabled: true
+    # password comes from secrets.yaml
+
+  master:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: ""
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  service:
+    type: ClusterIP
+    port: 6379
+
+# =============================================================================
+# Redmine (Bitnami) — uses internal postgres (externalDatabase)
+# =============================================================================
+redmine:
+  # Disable Bitnami's bundled postgres — we use our own
+  postgresql:
+    enabled: false
+
+  externalDatabase:
+    host: "{{ .Release.Name }}-postgres-postgresql"
+    port: 5432
+    user: sdlc
+    database: redmine
+    # password comes from secrets.yaml
+
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  service:
+    type: ClusterIP
+    port: 3000
+
+  # Expose Redmine via ingress (configure ingress below)
+  ingress:
+    enabled: false   # Set true and configure host below when ready
+
+# =============================================================================
+# Neo4j (official Neo4j Helm chart)
+# =============================================================================
+neo4j:
+  neo4j:
+    name: sdlc-neo4j
+    # password comes from secrets.yaml
+
+    resources:
+      cpu: "500m"
+      memory: "1Gi"
+
+  volumes:
+    data:
+      mode: defaultStorageClass
+      defaultStorageClass:
+        storageClassName: ""   # empty = cluster default (nfs-client)
+        requests:
+          storage: 20Gi
+
+  services:
+    neo4j:
+      spec:
+        type: ClusterIP
+
+  # Enable APOC plugin for advanced graph procedures
+  config:
+    dbms.security.procedures.unrestricted: "apoc.*"
+    server.memory.heap.initial_size: "512m"
+    server.memory.heap.max_size: "1g"
+
+  plugins:
+    - "apoc"
+
+# =============================================================================
+# ConfigMaps (agent configuration — mounted into agent pods)
+# =============================================================================
+agentConfig:
+  # Set to true to create ConfigMaps from the files below
+  enabled: true
+
+  # Path within the repo — values are injected via --set-file or helm template
+  # The templates/configmap-models.yaml reads these keys
+  modelsConfig: ""    # Populated via: --set-file agentConfig.modelsConfig=config/models.yaml
+  agentsConfig: ""    # Populated via: --set-file agentConfig.agentsConfig=config/agents.yaml
+
+# =============================================================================
+# Ingress (optional — configure when you add an ingress controller)
+# =============================================================================
+ingress:
+  enabled: false
+  className: "nginx"   # or traefik for k3s default
+  annotations: {}
+  hosts:
+    - host: redmine.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+          service: redmine
+          port: 3000
+    - host: neo4j.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+          service: neo4j-neo4j
+          port: 7474
+  tls: []
+  # tls:
+  #   - secretName: ai-sdlc-tls
+  #     hosts:
+  #       - redmine.example.internal
+  #       - neo4j.example.internal
+
+# =============================================================================
+# Namespace
+# =============================================================================
+namespaceOverride: "ai-sdlc"

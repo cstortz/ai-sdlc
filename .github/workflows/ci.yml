@@ -1,0 +1,243 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "develop", "feature/**"]
+  pull_request:
+    branches: ["main", "develop"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # 1. Lint & type-check
+  # ──────────────────────────────────────────────────────────────
+  lint:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install lint dependencies
+        run: pip install ruff mypy types-PyYAML
+
+      - name: ruff (lint)
+        run: ruff check ai-sdlc/ --select E,W,F,I --ignore E501
+
+      - name: ruff (format check)
+        run: ruff format ai-sdlc/ --check
+
+  # ──────────────────────────────────────────────────────────────
+  # 2. Unit tests — router
+  # ──────────────────────────────────────────────────────────────
+  test-router:
+    name: Tests / router
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-sdlc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run router tests
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || 'test-key' }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY || 'test-key' }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY || 'test-key' }}
+        run: |
+          python -m pytest router/tests/ -v --asyncio-mode=auto \
+            --tb=short --no-header \
+            -p no:cacheprovider
+
+  # ──────────────────────────────────────────────────────────────
+  # 3. Unit tests — context store
+  # ──────────────────────────────────────────────────────────────
+  test-context-store:
+    name: Tests / context store
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-sdlc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run context store tests
+        run: |
+          python -m pytest context_store/tests/ -v --asyncio-mode=auto \
+            --tb=short --no-header \
+            -p no:cacheprovider
+
+  # ──────────────────────────────────────────────────────────────
+  # 4. Unit tests — agents (all 7 layers)
+  # ──────────────────────────────────────────────────────────────
+  test-agents:
+    name: Tests / agents (L1–L7)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-sdlc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run agent tests
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || 'test-key' }}
+        run: |
+          python -m pytest agents/ -v --asyncio-mode=auto \
+            --tb=short --no-header \
+            -p no:cacheprovider \
+            --ignore=agents/intake/agent.py \
+            --ignore=agents/architecture/agent.py \
+            --ignore=agents/implementation/agent.py \
+            --ignore=agents/testing/agent.py \
+            --ignore=agents/review/agent.py \
+            --ignore=agents/deploy/agent.py \
+            --ignore=agents/monitor/agent.py
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-test-results
+          path: ai-sdlc/.pytest_cache/
+
+  # ──────────────────────────────────────────────────────────────
+  # 5. SAST — bandit security scan on src/
+  # ──────────────────────────────────────────────────────────────
+  sast:
+    name: SAST (bandit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-sdlc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install bandit
+        run: pip install bandit[toml]
+
+      - name: Run bandit scan
+        # Fail on HIGH severity; MEDIUM findings are reported but don't block
+        run: |
+          bandit -r . \
+            --exclude ./.venv,./tests,./docs \
+            -ll \
+            -f json \
+            -o bandit-report.json || true
+          bandit -r . \
+            --exclude ./.venv,./tests,./docs \
+            -lll \
+            -f txt
+        continue-on-error: false
+
+      - name: Upload bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: ai-sdlc/bandit-report.json
+
+  # ──────────────────────────────────────────────────────────────
+  # 6. Integration smoke test (requires secrets — only on main/develop)
+  # ──────────────────────────────────────────────────────────────
+  smoke-test:
+    name: Smoke test (live API)
+    runs-on: ubuntu-latest
+    needs: [test-router, test-context-store, test-agents]
+    if: >
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop'
+    defaults:
+      run:
+        working-directory: ai-sdlc
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Router smoke test (real API call)
+        # Calls the intake profile with a minimal prompt — verifies model routing works
+        run: |
+          python - <<'EOF'
+          import asyncio, os, sys
+          from router import ModelRouter
+          from pathlib import Path
+
+          async def main():
+              router = ModelRouter(config_path=Path("config/models.yaml"))
+              resp = await router.complete(
+                  profile="intake",
+                  messages=[{"role": "user", "content": "Say hello in one word."}],
+                  system="Respond with a single word.",
+              )
+              assert resp.content, "Empty response from router"
+              assert resp.cost_usd >= 0, "Negative cost"
+              print(f"✓ Router smoke test passed: model={resp.model_used} cost=${resp.cost_usd:.6f}")
+
+          asyncio.run(main())
+          EOF
+
+  # ──────────────────────────────────────────────────────────────
+  # 7. All checks must pass before merge
+  # ──────────────────────────────────────────────────────────────
+  ci-gate:
+    name: CI Gate (required)
+    runs-on: ubuntu-latest
+    needs: [lint, test-router, test-context-store, test-agents, sast]
+    if: always()
+    steps:
+      - name: Check all jobs
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "One or more CI jobs failed."
+            exit 1
+          fi
+          echo "All CI checks passed."
